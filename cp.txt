@@ -358,9 +358,12 @@ restore_snapshot() {
 recursive_subvolume_delete() {
     local mnt=$1     # The mount point (e.g., /mnt/snpsht.XXXXXX)
     local subvol=$2  # The subvolume name (e.g., @_broken_...)
-    btrfs subvolume list -o "$mnt" | cut -f 9 -d ' ' | grep "^$subvol/" | tac | while read -r nested; do
-        run_cmd "btrfs subvolume delete \"$mnt/$nested\""
-    done
+    local nested_subs=$(btrfs subvolume list -o "$mnt" | sed -E 's/.* path // ' | grep "^$subvol/")
+    if [[ -n "$nested_subs" ]]; then
+        echo "$nested_subs" | tac | while read -r nested; do
+            run_cmd "btrfs subvolume delete \"$mnt/$nested\""
+        done
+    fi
     run_cmd "btrfs subvolume delete \"$mnt/$subvol\""
 }
 
