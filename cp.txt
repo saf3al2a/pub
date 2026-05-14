@@ -151,7 +151,7 @@ else
     
     ask_input "Enter the EFI partition path" "/dev/${TARGET_DEV}1" "EFI_PART"
     ask_input "Enter the Root partition path" "/dev/${TARGET_DEV}2" "ROOT_PART"
-    BOOT_MOUNT="/mnt/boot"
+    BOOT_MOUNT="/mnt/boot/efi"
     
     until run_cmd "mkfs.fat -F32 $EFI_PART"; do
         warn "Formatting failed. Retry?"
@@ -206,12 +206,8 @@ run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots /dev/ma
 run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@var_log /dev/mapper/cryptroot /mnt/var/log"
 
 # Mount Boot/EFI
-if [[ "$INSTALL_TYPE" == "1" ]]; then
-    run_cmd "mkdir -p /mnt/boot/efi"
-    run_cmd "mount $EFI_PART /mnt/boot/efi"
-else
-    run_cmd "mount $EFI_PART /mnt/boot"
-fi
+run_cmd "mkdir -p /mnt/boot/efi"
+run_cmd "mount $EFI_PART /mnt/boot/efi"
 
 check_success "Subvolume mounting"
 run_cmd "lsblk /dev/mapper/cryptroot"
@@ -502,11 +498,24 @@ wait_step
 
 # --- 5. Mkinitcpio ---
 msg "Configuring Mkinitcpio..."
-preview_file "/etc/mkinitcpio.conf" "HOOKS" "Adding sd-encrypt and btrfs hooks."
+preview_file "/etc/mkinitcpio.conf" "HOOKS" "Adding sd-encrypt, btrfs, and the secure Keyfile."
+
+# 5a. Create LUKS Keyfile for Single Password
+msg "Generating LUKS Keyfile..."
+run_cmd "dd bs=512 count=4 if=/dev/urandom iflag=fullblock of=/crypto_keyfile.bin"
+run_cmd "chmod 000 /crypto_keyfile.bin"
+warn "I am now adding the keyfile to your LUKS header. You must type your password one last time."
+run_cmd "cryptsetup luksAddKey $ROOT_PART /crypto_keyfile.bin"
+
+# 5b. Add Keyfile to initramfs
+run_cmd "sed -i 's|^FILES=()|FILES=(/crypto_keyfile.bin)|' /etc/mkinitcpio.conf"
+
+# 5c. Update Hooks
 run_cmd "sed -i 's/udev/systemd/g' /etc/mkinitcpio.conf"
 run_cmd "sed -i 's/keyboard/keyboard keymap/g' /etc/mkinitcpio.conf"
 run_cmd "sed -i 's/block/block sd-encrypt btrfs/g' /etc/mkinitcpio.conf"
 run_cmd "sed -i 's/  */ /g' /etc/mkinitcpio.conf"
+
 preview_after "/etc/mkinitcpio.conf"
 wait_step
 
@@ -524,19 +533,19 @@ wait_step
 # --- 6. Bootloader ---
 msg "Configuring Grub..."
 LUKS_UUID=$(blkid -s UUID -o value "$ROOT_PART")
-preview_file "/etc/default/grub" "GRUB CONFIGURATION" "Injecting the LUKS UUID ($LUKS_UUID) into the boot parameters."
+preview_file "/etc/default/grub" "GRUB CONFIGURATION" "Enabling Cryptodisk and setting the Kernel Keyfile for single-password login."
 
-# Using a simpler sed with single quotes for the inner command
-run_cmd "sed -i 's|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot rw |' /etc/default/grub"
+# 6a. Enable Cryptodisk
+run_cmd "echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub"
+
+# 6b. Set Kernel CMDLINE with Keyfile
+run_cmd "sed -i 's|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=$LUKS_UUID=cryptroot rd.luks.key=$LUKS_UUID=:/crypto_keyfile.bin root=/dev/mapper/cryptroot rw |' /etc/default/grub"
 
 preview_after "/etc/default/grub"
 wait_step
 
-if [[ "$INSTALL_TYPE" == "1" ]]; then
-    run_cmd "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB"
-else
-    run_cmd "grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB"
-fi
+msg "Installing Grub to $BOOT_MOUNT..."
+run_cmd "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB"
 run_cmd "grub-mkconfig -o /boot/grub/grub.cfg"
 wait_step
 
