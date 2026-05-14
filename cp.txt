@@ -1,1 +1,330 @@
-https://raw.githubusercontent.com/saf3al2a/Learning/refs/heads/main/Tools/arch-setup/install.sh?token=GHSAT0AAAAAADZ7HBBVOAT43BMLM6YA352I2QFVJ7A
+#!/bin/bash
+
+# ==============================================================================
+# Arch Linux Interactive Installer
+# Developed for: sami (arch-setup)
+# Features: LUKS, Btrfs Subvolumes, Interactive Learning Previews
+# ==============================================================================
+
+# --- Colors & UI ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# --- Helper Functions ---
+
+msg() {
+    echo -e "\n${BLUE}${BOLD}[INFO]${NC} ${CYAN}$1${NC}"
+}
+
+success() {
+    echo -e "${GREEN}${BOLD}[SUCCESS]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}${BOLD}[WARNING]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}${BOLD}[ERROR]${NC} $1"
+    exit 1
+}
+
+wait_step() {
+    echo -e "\n${YELLOW}>> Press [Enter] to continue to the next step...${NC}"
+    read -r
+}
+
+ask_input() {
+    local prompt=$1
+    local default=$2
+    local var_name=$3
+    read -p "$(echo -e "${BOLD}${prompt}${NC} ${YELLOW}[Default: ${default}]${NC}: ")" input
+    if [[ -z "$input" ]]; then
+        eval "$var_name=\"$default\""
+    else
+        eval "$var_name=\"$input\""
+    fi
+}
+
+check_success() {
+    if [ $? -eq 0 ]; then
+        success "$1 finished successfully."
+    else
+        error "$1 failed. Please check the logs."
+    fi
+}
+
+preview_file() {
+    local file=$1
+    local title=$2
+    local brief=$3
+
+    echo -e "\n${BOLD}--- EDUCATIONAL BRIEF: ${title} ---${NC}"
+    echo -e "${CYAN}${brief}${NC}"
+    
+    if [[ -f "$file" ]]; then
+        echo -e "\n${YELLOW}BEFORE modification (${file}):${NC}"
+        cat "$file" | head -n 20
+        [[ $(wc -l < "$file") -gt 20 ]] && echo "..."
+    else
+        echo -e "\n${YELLOW}BEFORE modification:${NC} File does not exist yet."
+    fi
+}
+
+preview_after() {
+    local file=$1
+    echo -e "\n${GREEN}AFTER modification (${file}):${NC}"
+    if [[ -f "$file" ]]; then
+        cat "$file" | head -n 20
+        [[ $(wc -l < "$file") -gt 20 ]] && echo "..."
+    else
+        echo -e "${RED}File was not created!${NC}"
+    fi
+}
+
+# --- Initialization ---
+
+clear
+echo -e "${BLUE}${BOLD}"
+echo "----------------------------------------------------"
+echo "   WELCOME TO THE INTERACTIVE ARCH INSTALLER        "
+echo "----------------------------------------------------"
+echo -e "${NC}"
+
+# Check for internet
+if ! ping -c 1 google.com &> /dev/null; then
+    error "No internet connection detected. Please connect and try again."
+fi
+
+# ==============================================================================
+# STEP 1: PARTITIONING
+# ==============================================================================
+
+msg "Step 1: Partitioning"
+echo "Available block devices:"
+lsblk -d -n -o NAME,SIZE,MODEL | grep -v "loop"
+
+ask_input "Which device do you want to use? (e.g., vda, sda)" "vda" "TARGET_DEV"
+TARGET_PATH="/dev/${TARGET_DEV}"
+
+if [[ ! -b "$TARGET_PATH" ]]; then
+    error "Device $TARGET_PATH not found."
+fi
+
+echo -e "\n${BOLD}Is this a dual-boot installation (using an existing EFI partition)?${NC}"
+echo "1) Yes (Dual-boot)"
+echo "2) No (Fresh Installation - WILL WIPE DISK)"
+ask_input "Choose an option" "2" "INSTALL_TYPE"
+
+if [[ "$INSTALL_TYPE" == "1" ]]; then
+    msg "Dual-boot selected. Please partition manually."
+    warn "Ensure you have an EFI partition (FAT32) and a Root partition."
+    cfdisk "$TARGET_PATH"
+    
+    ask_input "Enter the EFI partition path (e.g., /dev/vda1)" "/dev/${TARGET_DEV}1" "EFI_PART"
+    ask_input "Enter the Root partition path (e.g., /dev/vda2)" "/dev/${TARGET_DEV}2" "ROOT_PART"
+    BOOT_MOUNT="/mnt/boot/efi"
+else
+    msg "Fresh installation selected. Preparing disk..."
+    warn "This will wipe $TARGET_PATH! Press Enter to confirm or Ctrl+C to abort."
+    read -r
+    
+    # Automated partitioning: 1G EFI, rest Root
+    # We use cfdisk for fresh too so the user sees it and can adjust if needed
+    echo -e "${YELLOW}I will open cfdisk for you. Create:${NC}"
+    echo "1. EFI Partition (1G, type 'EFI System')"
+    echo "2. Root Partition (Rest of space, type 'Linux filesystem')"
+    wait_step
+    cfdisk "$TARGET_PATH"
+    
+    ask_input "Enter the EFI partition path" "/dev/${TARGET_DEV}1" "EFI_PART"
+    ask_input "Enter the Root partition path" "/dev/${TARGET_DEV}2" "ROOT_PART"
+    BOOT_MOUNT="/mnt/boot"
+    
+    msg "Formatting EFI partition..."
+    mkfs.fat -F32 "$EFI_PART"
+    check_success "Formatting $EFI_PART"
+fi
+
+wait_step
+
+# ==============================================================================
+# STEP 2: ENCRYPTION & BTRFS
+# ==============================================================================
+
+msg "Step 2: Encryption & File System"
+
+echo -e "${CYAN}We are now encrypting the root partition using LUKS.${NC}"
+cryptsetup luksFormat "$ROOT_PART"
+check_success "LUKS Format"
+
+msg "Opening encrypted partition..."
+cryptsetup open "$ROOT_PART" cryptroot
+check_success "LUKS Open"
+
+msg "Creating Btrfs filesystem on cryptroot..."
+mkfs.btrfs -f /dev/mapper/cryptroot
+check_success "Btrfs creation"
+
+msg "Creating Subvolumes..."
+mount /dev/mapper/cryptroot /mnt
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@snapshots
+btrfs subvolume create /mnt/@var_log
+umount /mnt
+
+msg "Mounting Subvolumes with optimized options..."
+# Mount Root subvolume
+mount -o noatime,compress=zstd,space_cache=v2,subvol=@ /dev/mapper/cryptroot /mnt
+
+# Create mount points
+mkdir -p /mnt/{boot,home,.snapshots,var/log}
+
+# Mount others
+mount -o noatime,compress=zstd,space_cache=v2,subvol=@home /dev/mapper/cryptroot /mnt/home
+mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots
+mount -o noatime,compress=zstd,space_cache=v2,subvol=@var_log /dev/mapper/cryptroot /mnt/var/log
+
+# Mount Boot/EFI
+if [[ "$INSTALL_TYPE" == "1" ]]; then
+    mkdir -p /mnt/boot/efi
+    mount "$EFI_PART" /mnt/boot/efi
+else
+    mount "$EFI_PART" /mnt/boot
+fi
+
+check_success "Subvolume mounting"
+lsblk /dev/mapper/cryptroot
+wait_step
+
+# ==============================================================================
+# STEP 3: BASE INSTALLATION (PACSTRAP)
+# ==============================================================================
+
+msg "Step 3: Installing Base System"
+pacstrap -K /mnt base linux linux-firmware btrfs-progs cryptsetup grub efibootmgr nano networkmanager snapper
+check_success "Pacstrap"
+
+# --- FSTAB Preview ---
+preview_file "/mnt/etc/fstab" "FSTAB (File System Table)" "This file tells the system where to mount your partitions during boot. We use UUIDs to ensure accuracy even if drive letters change."
+genfstab -U /mnt >> /mnt/etc/fstab
+preview_after "/mnt/etc/fstab"
+wait_step
+
+# ==============================================================================
+# STEP 4: CHROOT CONFIGURATION (PREPARATION)
+# ==============================================================================
+
+msg "Step 4: Preparing for Chroot"
+
+# Export variables for the chroot script
+cat <<EOF > /mnt/chroot_setup.sh
+#!/bin/bash
+# Internal Chroot Setup Script
+
+# --- Colors & UI ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+msg() { echo -e "\n\${BLUE}\${BOLD}[CHROOT]\${NC} \${CYAN}\$1\${NC}"; }
+wait_step() { echo -e "\n\${YELLOW}>> Press [Enter] to continue...\${NC}"; read -r; }
+preview_file() { echo -e "\n\${BOLD}--- \${2} ---\${NC}\n\${CYAN}\${3}\${NC}"; }
+
+# Variables passed from host
+BOOT_MOUNT="$BOOT_MOUNT"
+INSTALL_TYPE="$INSTALL_TYPE"
+ROOT_PART="$ROOT_PART"
+
+# --- 1. Timezone ---
+msg "Setting Timezone (Asia/Baghdad)..."
+ln -sf /usr/share/zoneinfo/Asia/Baghdad /etc/localtime
+hwclock --systohc
+
+# --- 2. Localization ---
+msg "Configuring Locales..."
+preview_file "/etc/locale.gen" "LOCALE GENERATION" "We are enabling US English and Arabic (Iraq) support."
+sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+sed -i 's/#ar_IQ.UTF-8 UTF-8/ar_IQ.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+# --- 3. Network ---
+ask_hostname() {
+    read -p "$(echo -e "${BOLD}Type your PC name${NC} ${YELLOW}[Default: archpc]${NC}: ")" pcname
+    [[ -z "\$pcname" ]] && pcname="archpc"
+    echo "\$pcname" > /etc/hostname
+}
+msg "Setting Hostname..."
+ask_hostname
+
+# --- 4. Passwords ---
+msg "Set ROOT password:"
+passwd
+
+# --- 5. Mkinitcpio (LUKS Support) ---
+msg "Configuring Mkinitcpio..."
+# Educational preview of the hooks change
+preview_file "/etc/mkinitcpio.conf" "MKINITCPIO HOOKS" "We must add 'sd-encrypt' and 'btrfs' to the hooks so the system can unlock your drive and read the Btrfs filesystem at boot."
+# Automated edit: add keymap, sd-encrypt, btrfs
+sed -i 's/HOOKS=(base udev/HOOKS=(base systemd/' /etc/mkinitcpio.conf
+sed -i 's/keyboard autodetect modconf block/keyboard keymap autodetect modconf block sd-encrypt btrfs/' /etc/mkinitcpio.conf
+mkinitcpio -P
+msg "Installing grub-btrfs and inotify-tools..."
+pacman -S --noconfirm grub-btrfs inotify-tools
+wait_step
+
+# --- 6. Bootloader (Grub) ---
+msg "Configuring Grub..."
+LUKS_UUID=\$(blkid -s UUID -o value "\$ROOT_PART")
+preview_file "/etc/default/grub" "GRUB CONFIGURATION" "Injecting the LUKS UUID (\$LUKS_UUID) into the boot parameters so Grub knows which drive to unlock."
+
+# Edit GRUB_CMDLINE_LINUX
+sed -i "s|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=\$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot rw |" /etc/default/grub
+
+if [[ "\$INSTALL_TYPE" == "1" ]]; then
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+else
+    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+fi
+grub-mkconfig -o /boot/grub/grub.cfg
+
+# --- 7. Final Steps (Users & Desktop) ---
+msg "Installing Intel Ucode & NetworkManager..."
+pacman -S --noconfirm intel-ucode
+systemctl enable NetworkManager
+
+msg "Creating User Account..."
+read -p "Enter username: " username
+useradd -m -G wheel -s /bin/bash "\$username"
+passwd "\$username"
+
+msg "Configuring Sudo (Wheel group)..."
+sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+msg "Installing Desktop Environment (XFCE4)..."
+pacman -S --noconfirm xorg xfce4 xfce4-goodies ly
+systemctl enable ly
+
+msg "CHROOT SETUP COMPLETE!"
+exit
+EOF
+
+chmod +x /mnt/chroot_setup.sh
+arch-chroot /mnt /chroot_setup.sh
+
+# --- Post Chroot cleanup ---
+rm /mnt/chroot_setup.sh
+
+msg "Installation complete! You can now reboot."
+echo -e "${YELLOW}Don't forget to run setup-snapper.sh after your first login!${NC}"
