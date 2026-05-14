@@ -256,8 +256,13 @@ msg "Configuring Locales..."
 preview_file "/etc/locale.gen" "LOCALE GENERATION" "We are enabling US English and Arabic (Iraq) support."
 sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
 sed -i 's/#ar_IQ.UTF-8 UTF-8/ar_IQ.UTF-8 UTF-8/' /etc/locale.gen
+preview_after "/etc/locale.gen"
+wait_step
+
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
+preview_after "/etc/locale.conf"
+wait_step
 
 # --- 3. Network ---
 ask_hostname() {
@@ -275,11 +280,25 @@ passwd
 # --- 5. Mkinitcpio (LUKS Support) ---
 msg "Configuring Mkinitcpio..."
 # Educational preview of the hooks change
-preview_file "/etc/mkinitcpio.conf" "MKINITCPIO HOOKS" "We must add 'sd-encrypt' and 'btrfs' to the hooks so the system can unlock your drive and read the Btrfs filesystem at boot."
-# Automated edit: add keymap, sd-encrypt, btrfs
-sed -i 's/HOOKS=(base udev/HOOKS=(base systemd/' /etc/mkinitcpio.conf
-sed -i 's/keyboard autodetect modconf block/keyboard keymap autodetect modconf block sd-encrypt btrfs/' /etc/mkinitcpio.conf
+preview_file "/etc/mkinitcpio.conf" "MKINITCPIO HOOKS" "We are replacing 'udev' with 'systemd' and adding 'sd-encrypt' and 'btrfs' before 'filesystems'."
+
+# Robustly edit the HOOKS line
+# 1. Replace udev with systemd
+sed -i 's/udev/systemd/' /etc/mkinitcpio.conf
+# 2. Ensure keymap is after keyboard
+sed -i 's/keyboard/keyboard keymap/' /etc/mkinitcpio.conf
+# 3. Add sd-encrypt and btrfs before filesystems
+sed -i 's/block/block sd-encrypt btrfs/' /etc/mkinitcpio.conf
+# 4. Clean up any accidental double spaces
+sed -i 's/  */ /g' /etc/mkinitcpio.conf
+
+preview_after "/etc/mkinitcpio.conf"
+wait_step
+
+msg "Running mkinitcpio -P..."
 mkinitcpio -P
+check_success "Mkinitcpio"
+
 msg "Installing grub-btrfs and inotify-tools..."
 pacman -S --noconfirm grub-btrfs inotify-tools
 wait_step
@@ -292,12 +311,17 @@ preview_file "/etc/default/grub" "GRUB CONFIGURATION" "Injecting the LUKS UUID (
 # Edit GRUB_CMDLINE_LINUX
 sed -i "s|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=\$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot rw |" /etc/default/grub
 
+preview_after "/etc/default/grub"
+wait_step
+
+msg "Installing Grub to \$BOOT_MOUNT..."
 if [[ "\$INSTALL_TYPE" == "1" ]]; then
     grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
 else
     grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
 fi
 grub-mkconfig -o /boot/grub/grub.cfg
+wait_step
 
 # --- 7. Final Steps (Users & Desktop) ---
 msg "Installing Intel Ucode & NetworkManager..."
