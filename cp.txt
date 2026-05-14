@@ -250,6 +250,7 @@ ROOT_PART="$ROOT_PART"
 msg "Setting Timezone (Asia/Baghdad)..."
 ln -sf /usr/share/zoneinfo/Asia/Baghdad /etc/localtime
 hwclock --systohc
+wait_step
 
 # --- 2. Localization ---
 msg "Configuring Locales..."
@@ -324,21 +325,30 @@ grub-mkconfig -o /boot/grub/grub.cfg
 wait_step
 
 # --- 7. Final Steps (Users & Desktop) ---
-msg "Installing Intel Ucode & NetworkManager..."
-pacman -S --noconfirm intel-ucode
+msg "Installing Intel Ucode, Sudo & NetworkManager..."
+pacman -S --noconfirm intel-ucode sudo
 systemctl enable NetworkManager
+wait_step
 
 msg "Creating User Account..."
 read -p "Enter username: " username
 useradd -m -G wheel -s /bin/bash "\$username"
 passwd "\$username"
+wait_step
 
 msg "Configuring Sudo (Wheel group)..."
+preview_file "/etc/sudoers" "SUDOERS CONFIG" "Uncommenting the 'wheel' group so users in that group can use sudo."
 sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+preview_after "/etc/sudoers"
+wait_step
 
 msg "Installing Desktop Environment (XFCE4)..."
 pacman -S --noconfirm xorg xfce4 xfce4-goodies ly
-systemctl enable ly
+wait_step
+
+msg "Enabling Login Manager (Ly on tty2)..."
+systemctl enable ly@tty2.service
+wait_step
 
 msg "CHROOT SETUP COMPLETE!"
 exit
