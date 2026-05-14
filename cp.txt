@@ -34,6 +34,11 @@ error() {
     exit 1
 }
 
+run_cmd() {
+    echo -e "${CYAN}Executing: ${BOLD}$1${NC}"
+    eval "$1"
+}
+
 wait_step() {
     echo -e "\n${YELLOW}>> Press [Enter] to continue to the next step...${NC}"
     read -r
@@ -55,7 +60,14 @@ check_success() {
     if [ $? -eq 0 ]; then
         success "$1 finished successfully."
     else
-        error "$1 failed. Please check the logs."
+        warn "$1 failed."
+        echo -e "Do you want to [r]etry, [i]gnore, or [a]bort?"
+        read -p "(r/i/a): " choice
+        case $choice in
+            r) return 1 ;;
+            i) return 0 ;;
+            *) exit 1 ;;
+        esac
     fi
 }
 
@@ -160,47 +172,52 @@ wait_step
 msg "Step 2: Encryption & File System"
 
 echo -e "${CYAN}We are now encrypting the root partition using LUKS.${NC}"
-cryptsetup luksFormat "$ROOT_PART"
-check_success "LUKS Format"
+until cryptsetup luksFormat "$ROOT_PART"; do
+    warn "Encryption failed (did you type 'YES' correctly?)."
+    read -p "Do you want to [r]etry or [a]bort? (r/a): " choice
+    if [[ "$choice" != "r" ]]; then
+        error "Installation aborted by user."
+    fi
+done
 
 msg "Opening encrypted partition..."
-cryptsetup open "$ROOT_PART" cryptroot
+run_cmd "cryptsetup open $ROOT_PART cryptroot"
 check_success "LUKS Open"
 
 msg "Creating Btrfs filesystem on cryptroot..."
-mkfs.btrfs -f /dev/mapper/cryptroot
+run_cmd "mkfs.btrfs -f /dev/mapper/cryptroot"
 check_success "Btrfs creation"
 
 msg "Creating Subvolumes..."
-mount /dev/mapper/cryptroot /mnt
-btrfs subvolume create /mnt/@
-btrfs subvolume create /mnt/@home
-btrfs subvolume create /mnt/@snapshots
-btrfs subvolume create /mnt/@var_log
-umount /mnt
+run_cmd "mount /dev/mapper/cryptroot /mnt"
+run_cmd "btrfs subvolume create /mnt/@"
+run_cmd "btrfs subvolume create /mnt/@home"
+run_cmd "btrfs subvolume create /mnt/@snapshots"
+run_cmd "btrfs subvolume create /mnt/@var_log"
+run_cmd "umount /mnt"
 
 msg "Mounting Subvolumes with optimized options..."
 # Mount Root subvolume
-mount -o noatime,compress=zstd,space_cache=v2,subvol=@ /dev/mapper/cryptroot /mnt
+run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@ /dev/mapper/cryptroot /mnt"
 
 # Create mount points
-mkdir -p /mnt/{boot,home,.snapshots,var/log}
+run_cmd "mkdir -p /mnt/{boot,home,.snapshots,var/log}"
 
 # Mount others
-mount -o noatime,compress=zstd,space_cache=v2,subvol=@home /dev/mapper/cryptroot /mnt/home
-mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots
-mount -o noatime,compress=zstd,space_cache=v2,subvol=@var_log /dev/mapper/cryptroot /mnt/var/log
+run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@home /dev/mapper/cryptroot /mnt/home"
+run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@snapshots /dev/mapper/cryptroot /mnt/.snapshots"
+run_cmd "mount -o noatime,compress=zstd,space_cache=v2,subvol=@var_log /dev/mapper/cryptroot /mnt/var/log"
 
 # Mount Boot/EFI
 if [[ "$INSTALL_TYPE" == "1" ]]; then
-    mkdir -p /mnt/boot/efi
-    mount "$EFI_PART" /mnt/boot/efi
+    run_cmd "mkdir -p /mnt/boot/efi"
+    run_cmd "mount $EFI_PART /mnt/boot/efi"
 else
-    mount "$EFI_PART" /mnt/boot
+    run_cmd "mount $EFI_PART /mnt/boot"
 fi
 
 check_success "Subvolume mounting"
-lsblk /dev/mapper/cryptroot
+run_cmd "lsblk /dev/mapper/cryptroot"
 wait_step
 
 # ==============================================================================
@@ -208,7 +225,7 @@ wait_step
 # ==============================================================================
 
 msg "Step 3: Installing Base System"
-pacstrap -K /mnt base linux linux-firmware btrfs-progs cryptsetup grub efibootmgr nano networkmanager snapper
+run_cmd "pacstrap -K /mnt base linux linux-firmware btrfs-progs cryptsetup grub efibootmgr nano networkmanager snapper"
 check_success "Pacstrap"
 
 # --- FSTAB Preview ---
@@ -299,14 +316,28 @@ create_snapshot() {
     msg "Create New Snapshot"
     read -p "Enter description: " desc
     [[ -z "$desc" ]] && desc="manual snapshot"
-    snapper -c root create --description "$desc" --cleanup-algorithm timeline
+    run_cmd "snapper -c root create --description '$desc' --cleanup-algorithm timeline"
     success "Snapshot created: $desc"
-    grub-mkconfig -o /boot/grub/grub.cfg
+    run_cmd "grub-mkconfig -o /boot/grub/grub.cfg"
+}
+
+delete_snapshot() {
+    list_snapshots
+    echo ""
+    read -p "Enter Snapshot ID to DELETE: " sid
+    [[ -z "$sid" ]] && return
+    warn "Are you sure you want to delete snapshot #$sid? (y/N)"
+    read -p "> " confirm
+    if [[ "$confirm" == "y" ]]; then
+        run_cmd "snapper -c root delete $sid"
+        success "Snapshot #$sid deleted."
+        run_cmd "grub-mkconfig -o /boot/grub/grub.cfg"
+    fi
 }
 
 list_snapshots() {
     msg "Available Snapshots"
-    snapper -c root list
+    run_cmd "snapper -c root list"
 }
 
 restore_snapshot() {
@@ -316,21 +347,27 @@ restore_snapshot() {
     [[ -z "$sid" ]] && return
     msg "Starting Advanced Restore..."
     TEMP_MNT=$(mktemp -d /mnt/snpsht.XXXXXX)
-    mount -o subvol=/ "$CRYPT_DEV" "$TEMP_MNT"
+    run_cmd "mount -o subvol=/ $CRYPT_DEV $TEMP_MNT"
     TS=$(date +%Y%m%d_%H%M%S)
     BROKEN_NAME="@_broken_$TS"
-    mv "$TEMP_MNT/@" "$TEMP_MNT/$BROKEN_NAME"
-    btrfs subvolume snapshot "$TEMP_MNT/@snapshots/$sid/snapshot" "$TEMP_MNT/@"
-    umount "$TEMP_MNT"
-    rmdir "$TEMP_MNT"
+    run_cmd "mv $TEMP_MNT/@ $TEMP_MNT/$BROKEN_NAME"
+    run_cmd "btrfs subvolume snapshot $TEMP_MNT/@snapshots/$sid/snapshot $TEMP_MNT/@"
+    run_cmd "umount $TEMP_MNT"
+    run_cmd "rmdir $TEMP_MNT"
     success "RESTORE COMPLETE!"
     echo -e "${RED}${BOLD}!!! YOU MUST REBOOT NOW TO LOAD THE RESTORED SYSTEM !!!${NC}"
+}
+
+recursive_subvolume_delete() {
+    local target=$1
+    run_cmd "btrfs subvolume list -o \"$target\" | cut -f 9 -d ' ' | tac | xargs -I{} btrfs subvolume delete \"$target/{}\""
+    run_cmd "btrfs subvolume delete \"$target\""
 }
 
 cleanup_broken() {
     msg "Searching for @_broken subvolumes..."
     TEMP_MNT=$(mktemp -d /mnt/snpsht.XXXXXX)
-    mount -o subvol=/ "$CRYPT_DEV" "$TEMP_MNT"
+    run_cmd "mount -o subvol=/ $CRYPT_DEV $TEMP_MNT"
     BROKEN_SUBS=$(ls -d "$TEMP_MNT"/@_broken_* 2>/dev/null)
     if [[ -z "$BROKEN_SUBS" ]]; then
         success "No broken subvolumes found."
@@ -339,12 +376,15 @@ cleanup_broken() {
         for sub in $BROKEN_SUBS; do echo " - $(basename "$sub")"; done
         read -p "Do you want to delete ALL of them? (y/N): " choice
         if [[ "$choice" == "y" ]]; then
-            for sub in $BROKEN_SUBS; do btrfs subvolume delete "$sub"; done
+            for sub in $BROKEN_SUBS; do
+                warn "Deleting $sub recursively..."
+                recursive_subvolume_delete "$sub"
+            done
             success "Cleanup finished."
         fi
     fi
-    umount "$TEMP_MNT"
-    rmdir "$TEMP_MNT"
+    run_cmd "umount $TEMP_MNT"
+    run_cmd "rmdir $TEMP_MNT"
 }
 
 check_root
@@ -352,18 +392,20 @@ auto_setup
 while true; do
     show_dashboard
     echo "  1) Create New Snapshot"
-    echo "  2) List Snapshots"
-    echo "  3) Restore from Snapshot (Rollback)"
-    echo "  4) Cleanup @_broken subvolumes"
-    echo "  5) Exit"
+    echo "  2) Delete Snapshot"
+    echo "  3) List Snapshots"
+    echo "  4) Restore from Snapshot (Rollback)"
+    echo "  5) Cleanup @_broken subvolumes"
+    echo "  6) Exit"
     echo ""
-    read -p "Select an option [1-5]: " opt
+    read -p "Select an option [1-6]: " opt
     case $opt in
         1) create_snapshot ;;
-        2) list_snapshots ;;
-        3) restore_snapshot ;;
-        4) cleanup_broken ;;
-        5) exit 0 ;;
+        2) delete_snapshot ;;
+        3) list_snapshots ;;
+        4) restore_snapshot ;;
+        5) cleanup_broken ;;
+        6) exit 0 ;;
         *) warn "Invalid option." ;;
     esac
     read -p "Press Enter to return to menu..."
@@ -387,8 +429,13 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 msg() { echo -e "\n\${BLUE}\${BOLD}[CHROOT]\${NC} \${CYAN}\$1\${NC}"; }
+success() { echo -e "\${GREEN}\${BOLD}[SUCCESS]\${NC} \$1"; }
+warn() { echo -e "\${YELLOW}\${BOLD}[WARNING]\${NC} \$1"; }
 wait_step() { echo -e "\n\${YELLOW}>> Press [Enter] to continue...\${NC}"; read -r; }
-preview_file() { echo -e "\n\${BOLD}--- \${2} ---\${NC}\n\${CYAN}\${3}\${NC}"; }
+run_cmd() { echo -e "\${CYAN}Executing: \${BOLD}\$1\${NC}"; eval "\$1"; }
+preview_file() { echo -e "\n\${BOLD}--- EDUCATIONAL BRIEF: \${2} ---\${NC}\n\${CYAN}\${3}\${NC}\n\${YELLOW}BEFORE modification (\${1}):\${NC}"; [[ -f "\$1" ]] && head -n 20 "\$1" || echo "File not found."; }
+preview_after() { echo -e "\n\${GREEN}AFTER modification (\${1}):\${NC}"; [[ -f "\$1" ]] && head -n 20 "\$1"; }
+check_success() { if [ \$? -eq 0 ]; then success "\$1 finished successfully."; else echo -e "\${RED}Failed. Press Enter to try to continue...\${NC}"; read; fi; }
 
 # Variables passed from host
 BOOT_MOUNT="$BOOT_MOUNT"
@@ -397,31 +444,28 @@ ROOT_PART="$ROOT_PART"
 
 # --- 1. Timezone ---
 msg "Setting Timezone (Asia/Baghdad)..."
-ln -sf /usr/share/zoneinfo/Asia/Baghdad /etc/localtime
-hwclock --systohc
+run_cmd "ln -sf /usr/share/zoneinfo/Asia/Baghdad /etc/localtime"
+run_cmd "hwclock --systohc"
 wait_step
 
 # --- 2. Localization ---
 msg "Configuring Locales..."
 preview_file "/etc/locale.gen" "LOCALE GENERATION" "We are enabling US English and Arabic (Iraq) support."
-sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-sed -i 's/#ar_IQ.UTF-8 UTF-8/ar_IQ.UTF-8 UTF-8/' /etc/locale.gen
+run_cmd "sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen"
+run_cmd "sed -i 's/#ar_IQ.UTF-8 UTF-8/ar_IQ.UTF-8 UTF-8/' /etc/locale.gen"
 preview_after "/etc/locale.gen"
 wait_step
 
-locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
+run_cmd "locale-gen"
+run_cmd "echo 'LANG=en_US.UTF-8' > /etc/locale.conf"
 preview_after "/etc/locale.conf"
 wait_step
 
 # --- 3. Network ---
-ask_hostname() {
-    read -p "$(echo -e "${BOLD}Type your PC name${NC} ${YELLOW}[Default: archpc]${NC}: ")" pcname
-    [[ -z "\$pcname" ]] && pcname="archpc"
-    echo "\$pcname" > /etc/hostname
-}
-msg "Setting Hostname..."
-ask_hostname
+read -p "Type your PC name [Default: archpc]: " pcname
+[[ -z "\$pcname" ]] && pcname="archpc"
+run_cmd "echo \$pcname > /etc/hostname"
+wait_step
 
 # --- 4. Passwords ---
 msg "Set ROOT password:"
@@ -433,24 +477,21 @@ msg "Configuring Mkinitcpio..."
 preview_file "/etc/mkinitcpio.conf" "MKINITCPIO HOOKS" "We are replacing 'udev' with 'systemd' and adding 'sd-encrypt' and 'btrfs' before 'filesystems'."
 
 # Robustly edit the HOOKS line
-# 1. Replace udev with systemd
-sed -i 's/udev/systemd/' /etc/mkinitcpio.conf
-# 2. Ensure keymap is after keyboard
-sed -i 's/keyboard/keyboard keymap/' /etc/mkinitcpio.conf
-# 3. Add sd-encrypt and btrfs before filesystems
-sed -i 's/block/block sd-encrypt btrfs/' /etc/mkinitcpio.conf
-# 4. Clean up any accidental double spaces
-sed -i 's/  */ /g' /etc/mkinitcpio.conf
+run_cmd "sed -i 's/udev/systemd/g' /etc/mkinitcpio.conf"
+run_cmd "sed -i 's/keyboard/keyboard keymap/g' /etc/mkinitcpio.conf"
+run_cmd "sed -i 's/block/block sd-encrypt btrfs/g' /etc/mkinitcpio.conf"
+run_cmd "sed -i 's/  */ /g' /etc/mkinitcpio.conf"
 
 preview_after "/etc/mkinitcpio.conf"
 wait_step
 
 msg "Running mkinitcpio -P..."
-mkinitcpio -P
+run_cmd "mkinitcpio -P"
 check_success "Mkinitcpio"
+wait_step
 
 msg "Installing grub-btrfs and inotify-tools..."
-pacman -S --noconfirm grub-btrfs inotify-tools
+run_cmd "pacman -S --noconfirm grub-btrfs inotify-tools"
 wait_step
 
 # --- 6. Bootloader (Grub) ---
@@ -466,37 +507,37 @@ wait_step
 
 msg "Installing Grub to \$BOOT_MOUNT..."
 if [[ "\$INSTALL_TYPE" == "1" ]]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB
+    run_cmd "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB"
 else
-    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+    run_cmd "grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB"
 fi
-grub-mkconfig -o /boot/grub/grub.cfg
+run_cmd "grub-mkconfig -o /boot/grub/grub.cfg"
 wait_step
 
 # --- 7. Final Steps (Users & Desktop) ---
 msg "Installing Intel Ucode, Sudo & NetworkManager..."
-pacman -S --noconfirm intel-ucode sudo
-systemctl enable NetworkManager
+run_cmd "pacman -S --noconfirm intel-ucode sudo"
+run_cmd "systemctl enable NetworkManager"
 wait_step
 
 msg "Creating User Account..."
 read -p "Enter username: " username
-useradd -m -G wheel -s /bin/bash "\$username"
-passwd "\$username"
+run_cmd "useradd -m -G wheel -s /bin/bash \$username"
+passwd \$username
 wait_step
 
 msg "Configuring Sudo (Wheel group)..."
 preview_file "/etc/sudoers" "SUDOERS CONFIG" "Uncommenting the 'wheel' group so users in that group can use sudo."
-sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+run_cmd "sed -i 's/# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers"
 preview_after "/etc/sudoers"
 wait_step
 
 msg "Installing Desktop Environment (XFCE4)..."
-pacman -S --noconfirm xorg xfce4 xfce4-goodies ly
+run_cmd "pacman -S --noconfirm xorg xfce4 xfce4-goodies ly"
 wait_step
 
 msg "Enabling Login Manager (Ly on tty2)..."
-systemctl enable ly@tty2.service
+run_cmd "systemctl enable ly@tty2.service"
 wait_step
 
 msg "CHROOT SETUP COMPLETE!"
