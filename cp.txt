@@ -500,15 +500,16 @@ wait_step
 msg "Configuring Mkinitcpio..."
 preview_file "/etc/mkinitcpio.conf" "HOOKS" "Adding sd-encrypt, btrfs, and the secure Keyfile."
 
-# 5a. Create LUKS Keyfile for Single Password
-msg "Generating LUKS Keyfile..."
-run_cmd "dd bs=512 count=4 if=/dev/urandom iflag=fullblock of=/crypto_keyfile.bin"
-run_cmd "chmod 000 /crypto_keyfile.bin"
-warn "I am now adding the keyfile to your LUKS header. You must type your password one last time."
-run_cmd "cryptsetup luksAddKey $ROOT_PART /crypto_keyfile.bin"
+# 5a. Create LUKS Keyfile in the standard systemd location
+msg "Generating Secure LUKS Keyfile..."
+run_cmd "mkdir -p /etc/cryptsetup-keys.d"
+run_cmd "dd bs=512 count=4 if=/dev/urandom iflag=fullblock of=/etc/cryptsetup-keys.d/cryptroot.key"
+run_cmd "chmod 000 /etc/cryptsetup-keys.d/cryptroot.key"
+warn "Adding the keyfile to LUKS. Please type your password one last time."
+run_cmd "cryptsetup luksAddKey $ROOT_PART /etc/cryptsetup-keys.d/cryptroot.key"
 
 # 5b. Add Keyfile to initramfs
-run_cmd "sed -i 's|^FILES=()|FILES=(/crypto_keyfile.bin)|' /etc/mkinitcpio.conf"
+run_cmd "sed -i 's|^FILES=()|FILES=(/etc/cryptsetup-keys.d/cryptroot.key)|' /etc/mkinitcpio.conf"
 
 # 5c. Update Hooks
 run_cmd "sed -i 's/udev/systemd/g' /etc/mkinitcpio.conf"
@@ -538,8 +539,8 @@ preview_file "/etc/default/grub" "GRUB CONFIGURATION" "Enabling Cryptodisk and s
 # 6a. Enable Cryptodisk
 run_cmd "echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub"
 
-# 6b. Set Kernel CMDLINE with Keyfile
-run_cmd "sed -i 's|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=$LUKS_UUID=cryptroot rd.luks.key=$LUKS_UUID=:/crypto_keyfile.bin root=/dev/mapper/cryptroot rw |' /etc/default/grub"
+# 6b. Set Kernel CMDLINE (Simplified for automatic key detection)
+run_cmd "sed -i 's|GRUB_CMDLINE_LINUX=\"|GRUB_CMDLINE_LINUX=\"rd.luks.name=$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot rw |' /etc/default/grub"
 
 preview_after "/etc/default/grub"
 wait_step
