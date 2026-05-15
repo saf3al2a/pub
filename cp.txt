@@ -168,8 +168,8 @@ wait_step
 
 msg "Step 2: Encryption & File System"
 
-echo -e "${CYAN}We are now encrypting the root partition using LUKS.${NC}"
-until cryptsetup luksFormat "$ROOT_PART"; do
+echo -e "${CYAN}We are now encrypting the root partition using LUKS1 (for Grub compatibility).${NC}"
+until cryptsetup luksFormat --type luks1 "$ROOT_PART"; do
     warn "Encryption failed (did you type 'YES' correctly?)."
     read -p "Do you want to [r]etry or [a]bort? (r/a): " choice
     if [[ "$choice" != "r" ]]; then
